@@ -33,25 +33,6 @@
     }
 
 
-
-    public sealed class SnapSaveResponse
-    {
-        public bool success { get; set; }
-        public SnapSaveData? data { get; set; }
-    }
-
-    public sealed class SnapSaveData
-    {
-        public List<SnapSaveMedia> media { get; set; } = [];
-    }
-
-    public sealed class SnapSaveMedia
-    {
-        public string url { get; set; } = string.Empty;
-        public string? thumbnail { get; set; }
-        public string type { get; set; } = "video";
-    }
-
     // ── view / embed models ──────────────────────────────────────────────────────
 
     public sealed class OEmbedModel

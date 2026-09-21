@@ -11,10 +11,16 @@ services:
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://+:8080
-      SnapSave__Port: 3200
       APP_PASSWORD: password
       DONATION_CURRENT: 0
       DONATION_TARGET: 100
+      # Optional: set these to use a logged-in Instagram session for far more
+      # reliable fetching (anonymous requests get rate-limited/blocked more
+      # often). Leave unset to run fully anonymously. See README for how to
+      # obtain these values from your own account.
+      # Instagram__SessionId: ""
+      # Instagram__DsUserId: ""
+      # Instagram__CsrfToken: ""
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/"]
       interval: 30s

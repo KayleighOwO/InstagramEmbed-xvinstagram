@@ -21,15 +21,28 @@ builder.Services.AddHttpClient("regular", c =>
     c.Timeout = TimeSpan.FromMinutes(5);
 });
 
-builder.Services.AddHttpClient("snapsave", c =>
+// Talks only to instagram.com / i.instagram.com — no third-party downloader.
+builder.Services.AddHttpClient("instagram", c =>
 {
-    c.Timeout = TimeSpan.FromSeconds(20);
+    c.DefaultRequestHeaders.UserAgent.ParseAdd(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36");
+    c.DefaultRequestHeaders.Accept.ParseAdd("*/*");
+    c.DefaultRequestHeaders.AcceptLanguage.ParseAdd("en-US,en;q=0.9");
+    c.Timeout = TimeSpan.FromSeconds(15);
+})
+.ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+{
+    // We manage the Cookie header ourselves per-request (see InstagramMediaService),
+    // so cookies must not be handled by a shared CookieContainer here.
+    UseCookies = false,
+    AllowAutoRedirect = true
 });
 
 builder.Services.AddSingleton<PostCacheService>();
+builder.Services.AddSingleton<InstagramMediaService>();
 builder.Services.AddSingleton<DonateMessageService>();
 
-builder.Services.AddHostedService<SnapSaveProcessService>();
+builder.Services.Configure<InstagramSettings>(builder.Configuration.GetSection("Instagram"));
 
 builder.Services.Configure<DonationSettings>(options =>
 {
