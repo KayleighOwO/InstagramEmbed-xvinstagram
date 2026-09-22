@@ -12,21 +12,22 @@ namespace InstagramEmbed.Application.Services
     /// to instagram.com or i.instagram.com.
     ///
     /// Strategy, in order:
-    ///   1. Instagram's own media-info endpoint (the same one instagram.com's
-    ///      web/mobile clients call internally). Works anonymously some of the
-    ///      time; if an operator-owned session is configured (see
-    ///      <see cref="InstagramSettings"/>) it's sent along and makes this far
-    ///      more reliable, because Instagram throttles anonymous traffic much
-    ///      more aggressively than logged-in traffic.
+    ///   1. Instagram's own media-info endpoint, tried against both
+    ///      i.instagram.com and www.instagram.com, with "guest" cookies primed
+    ///      from a plain page load (the way a real browser would have them)
+    ///      when no operator session is configured.
     ///   2. The public "/embed/captioned/" page, scraped as a best-effort
-    ///      fallback. Instagram has been progressively locking this down too,
-    ///      so treat it as a bonus, not a guarantee.
+    ///      fallback.
     ///
-    /// Realistic expectations: with no session configured this will work for
-    /// some posts and get rate-limited/blocked on others — that's Instagram's
-    /// anti-scraping behavior, not a bug here. Configuring a session for an
-    /// account you control is what makes this consistently reliable, and it's
-    /// still just you talking to Instagram, not routing through anyone else.
+    /// Current real-world behavior (observed in production logs): Instagram
+    /// increasingly returns its logged-out web-app shell (HTML, "not-logged-in"
+    /// class) instead of JSON for #1 when there's no valid session, and has
+    /// also been locking down #2. In practice this means: without
+    /// <see cref="InstagramSettings"/> configured, expect a low and declining
+    /// success rate, not "works most of the time." Configuring a session from
+    /// an account you control is not just an optimization anymore — it's
+    /// close to required for reliable operation. It's still only Instagram
+    /// you're talking to, just authenticated instead of anonymous.
     /// </summary>
     public sealed class InstagramMediaService
     {
@@ -35,6 +36,11 @@ namespace InstagramEmbed.Application.Services
         // app" as the caller — it is not a login credential or a secret API key,
         // and it's the same value visible in any browser's network tab.
         private const string IgAppId = "936619743392459";
+
+        // Also a public, static value sent by the web client on the same requests.
+        private const string AsbdId = "129477";
+
+        private static readonly string[] MediaInfoHosts = ["i.instagram.com", "www.instagram.com"];
 
         private const string Base64UrlAlphabet =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -49,10 +55,18 @@ namespace InstagramEmbed.Application.Services
 
         private static readonly Regex VideoUrlRegex = new("\"video_url\":\"(?<u>[^\"]+)\"", RegexOptions.Compiled);
         private static readonly Regex DisplayUrlRegex = new("\"display_url\":\"(?<u>[^\"]+)\"", RegexOptions.Compiled);
+        private static readonly Regex CsrfCookieRegex = new(@"csrftoken=([^;]+)", RegexOptions.Compiled);
 
         private readonly HttpClient _http;
         private readonly ILogger<InstagramMediaService> _logger;
         private readonly InstagramSettings _settings;
+
+        // Lazily-primed "guest" cookies (csrftoken/mid/ig_did/datr) from a plain
+        // page load, reused across anonymous requests the way a real browser
+        // would carry them. Only used when no operator session is configured.
+        private readonly SemaphoreSlim _guestCookieLock = new(1, 1);
+        private string? _guestCookieHeader;
+        private DateTime _guestCookieExpiresUtc = DateTime.MinValue;
 
         public InstagramMediaService(IHttpClientFactory factory, ILogger<InstagramMediaService> logger,
             IOptions<InstagramSettings> settings)
@@ -104,15 +118,31 @@ namespace InstagramEmbed.Application.Services
             return await FetchFromEmbedPageAsync(cacheId, instagramUrl, shortcode, ct);
         }
 
-        // ── Strategy 1: Instagram's own media-info API ──────────────────────
+        // ── Strategy 1: Instagram's own media-info API, tried against each host ──
         private async Task<CachedPost?> FetchByMediaIdAsync(string cacheId, string instagramUrl, long mediaId, CancellationToken ct)
+        {
+            foreach (var host in MediaInfoHosts)
+            {
+                var post = await TryMediaInfoHostAsync(cacheId, instagramUrl, mediaId, host, ct);
+                if (post != null) return post;
+            }
+            return null;
+        }
+
+        private async Task<CachedPost?> TryMediaInfoHostAsync(string cacheId, string instagramUrl, long mediaId, string host, CancellationToken ct)
         {
             try
             {
                 using var req = new HttpRequestMessage(HttpMethod.Get,
-                    $"https://i.instagram.com/api/v1/media/{mediaId}/info/");
+                    $"https://{host}/api/v1/media/{mediaId}/info/");
+
                 req.Headers.Add("X-IG-App-ID", IgAppId);
-                ApplySessionIfConfigured(req);
+                req.Headers.Add("X-ASBD-ID", AsbdId);
+                req.Headers.Add("X-Requested-With", "XMLHttpRequest");
+                req.Headers.Referrer = new Uri("https://www.instagram.com/");
+                req.Headers.Add("Origin", "https://www.instagram.com");
+
+                await ApplyCookiesAsync(req, ct);
 
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 cts.CancelAfter(TimeSpan.FromSeconds(12));
@@ -122,15 +152,26 @@ namespace InstagramEmbed.Application.Services
 
                 if (!resp.IsSuccessStatusCode)
                 {
-                    _logger.LogWarning("media-info API returned {Status} for media {Id}: {Body}",
-                        resp.StatusCode, mediaId, Truncate(body));
+                    if (LooksLikeLoginWall(body))
+                    {
+                        _logger.LogWarning(
+                            "{Host} returned {Status} (Instagram's logged-out web shell) for media {Id} — " +
+                            "Instagram is gating this endpoint behind login right now. Configure " +
+                            "Instagram:SessionId (see README) to fix this.",
+                            host, resp.StatusCode, mediaId);
+                    }
+                    else
+                    {
+                        _logger.LogWarning("{Host} media-info API returned {Status} for media {Id}: {Body}",
+                            host, resp.StatusCode, mediaId, Truncate(body));
+                    }
                     return null;
                 }
 
                 using var doc = JsonDocument.Parse(body);
                 if (!doc.RootElement.TryGetProperty("items", out var items) || items.GetArrayLength() == 0)
                 {
-                    _logger.LogWarning("media-info API returned no items for media {Id}", mediaId);
+                    _logger.LogWarning("{Host} media-info API returned no items for media {Id}", host, mediaId);
                     return null;
                 }
 
@@ -138,29 +179,103 @@ namespace InstagramEmbed.Application.Services
             }
             catch (OperationCanceledException)
             {
-                _logger.LogWarning("media-info API timed out for media {Id}", mediaId);
+                _logger.LogWarning("{Host} media-info API timed out for media {Id}", host, mediaId);
+                return null;
+            }
+            catch (JsonException)
+            {
+                _logger.LogWarning("{Host} media-info API returned non-JSON for media {Id}", host, mediaId);
                 return null;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "media-info API failed for media {Id}", mediaId);
+                _logger.LogError(ex, "{Host} media-info API failed for media {Id}", host, mediaId);
                 return null;
             }
         }
 
-        private void ApplySessionIfConfigured(HttpRequestMessage req)
-        {
-            if (!_settings.HasSession) return;
+        private static bool LooksLikeLoginWall(string body) =>
+            body.Contains("not-logged-in", StringComparison.OrdinalIgnoreCase) ||
+            body.Contains("\"require_login\"", StringComparison.OrdinalIgnoreCase) ||
+            body.Contains("class=\"no-js", StringComparison.OrdinalIgnoreCase);
 
-            var cookie = $"sessionid={_settings.SessionId}";
-            if (!string.IsNullOrWhiteSpace(_settings.DsUserId)) cookie += $"; ds_user_id={_settings.DsUserId}";
-            if (!string.IsNullOrWhiteSpace(_settings.CsrfToken))
+        /// <summary>
+        /// Attaches a Cookie header: the operator's own session if configured,
+        /// otherwise "guest" cookies primed from a plain page load. Also adds
+        /// the matching X-CSRFToken header, which Instagram checks against the
+        /// csrftoken cookie value.
+        /// </summary>
+        private async Task ApplyCookiesAsync(HttpRequestMessage req, CancellationToken ct)
+        {
+            if (_settings.HasSession)
             {
-                cookie += $"; csrftoken={_settings.CsrfToken}";
-                req.Headers.Add("X-CSRFToken", _settings.CsrfToken);
+                var cookie = $"sessionid={_settings.SessionId}";
+                if (!string.IsNullOrWhiteSpace(_settings.DsUserId)) cookie += $"; ds_user_id={_settings.DsUserId}";
+                if (!string.IsNullOrWhiteSpace(_settings.CsrfToken))
+                {
+                    cookie += $"; csrftoken={_settings.CsrfToken}";
+                    req.Headers.Add("X-CSRFToken", _settings.CsrfToken);
+                }
+                req.Headers.Add("Cookie", cookie);
+                return;
             }
 
-            req.Headers.Add("Cookie", cookie);
+            var guestCookie = await GetGuestCookieHeaderAsync(ct);
+            if (guestCookie == null) return;
+
+            req.Headers.Add("Cookie", guestCookie);
+            var csrfMatch = CsrfCookieRegex.Match(guestCookie);
+            if (csrfMatch.Success)
+                req.Headers.Add("X-CSRFToken", csrfMatch.Groups[1].Value);
+        }
+
+        /// <summary>
+        /// Loads instagram.com once to pick up the baseline cookies (csrftoken,
+        /// mid, ig_did, datr) a real browser would already be carrying, and
+        /// caches them for a while. A from-nowhere request with zero cookies
+        /// at all is an easy signal for Instagram's anti-bot checks to flag.
+        /// </summary>
+        private async Task<string?> GetGuestCookieHeaderAsync(CancellationToken ct)
+        {
+            if (_guestCookieHeader != null && DateTime.UtcNow < _guestCookieExpiresUtc)
+                return _guestCookieHeader;
+
+            await _guestCookieLock.WaitAsync(ct);
+            try
+            {
+                if (_guestCookieHeader != null && DateTime.UtcNow < _guestCookieExpiresUtc)
+                    return _guestCookieHeader;
+
+                using var req = new HttpRequestMessage(HttpMethod.Get, "https://www.instagram.com/");
+                using var resp = await _http.SendAsync(req, ct);
+
+                var cookies = new List<string>();
+                if (resp.Headers.TryGetValues("Set-Cookie", out var setCookies))
+                {
+                    foreach (var sc in setCookies)
+                    {
+                        var namePart = sc.Split(';')[0].Trim();
+                        if (namePart.Contains('=')) cookies.Add(namePart);
+                    }
+                }
+
+                _guestCookieHeader = cookies.Count > 0 ? string.Join("; ", cookies) : null;
+                _guestCookieExpiresUtc = DateTime.UtcNow.AddMinutes(30);
+
+                if (_guestCookieHeader == null)
+                    _logger.LogWarning("Could not prime guest cookies from instagram.com (no Set-Cookie headers returned)");
+
+                return _guestCookieHeader;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to prime guest cookies from instagram.com");
+                return null;
+            }
+            finally
+            {
+                _guestCookieLock.Release();
+            }
         }
 
         private static CachedPost BuildCachedPost(string cacheId, string instagramUrl, JsonElement item)
@@ -263,11 +378,16 @@ namespace InstagramEmbed.Application.Services
         {
             try
             {
+                using var req = new HttpRequestMessage(HttpMethod.Get,
+                    $"https://www.instagram.com/p/{shortcode}/embed/captioned/");
+                req.Headers.Referrer = new Uri("https://www.instagram.com/");
+                await ApplyCookiesAsync(req, ct);
+
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 cts.CancelAfter(TimeSpan.FromSeconds(10));
 
-                string html = await _http.GetStringAsync(
-                    $"https://www.instagram.com/p/{shortcode}/embed/captioned/", cts.Token);
+                using var resp = await _http.SendAsync(req, cts.Token);
+                string html = await resp.Content.ReadAsStringAsync(cts.Token);
 
                 var videoMatch = VideoUrlRegex.Match(html);
                 var displayMatch = DisplayUrlRegex.Match(html);

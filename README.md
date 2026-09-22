@@ -14,9 +14,9 @@ InstagramEmbed talks **directly to Instagram** — there is no snapsave.app, sna
 
 ## A note on reliability
 
-Instagram actively rate-limits and blocks anonymous scraping — this affects every self-hosted Instagram embed tool, not just this one (see e.g. [Wikidepia/InstaFix](https://github.com/Wikidepia/InstaFix), archived after Instagram started blocking its embed-page scraping). Running this with no session configured will work for some posts and fail for others.
+Instagram actively rate-limits and blocks anonymous scraping — this affects every self-hosted Instagram embed tool, not just this one (see e.g. [Wikidepia/InstaFix](https://github.com/Wikidepia/InstaFix), archived after Instagram started blocking its embed-page scraping). In production this has shown up as Instagram returning its logged-out web-app shell instead of real data for anonymous requests, essentially all the time, not just occasionally.
 
-For consistent results, configure `Instagram:SessionId` (and ideally `Instagram:DsUserId`) with a session from an Instagram account you control — see [Configuration](#configuration) below. This still only talks to Instagram; it just authenticates as an account you own instead of going in anonymously.
+In practice: **a configured session is close to required for this to work at all right now**, not just a reliability nice-to-have. Set `Instagram:SessionId` (and ideally `Instagram:DsUserId`) to a session from an Instagram account you control — see [Configuration](#configuration) below. This still only talks to Instagram; it just authenticates as an account you own instead of going in anonymously. The app also primes a few baseline "guest" cookies from a plain page load before making anonymous requests, which helps somewhat but doesn't reliably get past the login wall on its own.
 
 ## Supports
 
@@ -38,6 +38,7 @@ For more information, visit [vxinstagram.com](https://vxinstagram.com)
 - Docker
 - A domain pointing to your server
 - A reverse proxy (Nginx, Caddy, etc.) for TLS
+- An Instagram session from an account you control — see [Configuration](#configuration). Without one, expect most requests to fail; see [A note on reliability](#a-note-on-reliability).
 
 There's no pre-built image for this fork — the original `alsauce/vxinstagram` Docker Hub image is built from the snapsave-based codebase and won't have these changes, so build from source instead. There's also no Node stage to worry about anymore, which makes the build a bit faster.
 
@@ -86,7 +87,7 @@ All settings can be provided via `appsettings.json`, environment variables (`Sec
 
 **To obtain these values:** log into instagram.com in a browser using an account you're comfortable using for this purpose, open dev tools → Application (or Storage) → Cookies → `instagram.com`, and copy the `sessionid` and `ds_user_id` values. Treat them like a password — anyone with them can act as that account.
 
-Leaving these blank runs the app in fully anonymous mode. It'll still work for a meaningful share of requests, just less consistently — see [A note on reliability](#a-note-on-reliability).
+Leaving these blank runs the app in fully anonymous mode. Based on current behavior, expect this to fail for most or all content until you configure a session — see [A note on reliability](#a-note-on-reliability).
 
 ## Credits
 
