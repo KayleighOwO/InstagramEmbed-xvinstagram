@@ -1,5 +1,7 @@
 # InstagramEmbed (vxinstagram)
 
+> This is a fork — [KayleighOwO/InstagramEmbed-xvinstagram](https://github.com/KayleighOwO/InstagramEmbed-xvinstagram) — of the original [Lainmode/InstagramEmbed-vxinstagram](https://github.com/Lainmode/InstagramEmbed-vxinstagram), reworked to fetch media directly from Instagram instead of through snapsave.app. See [Credits](#credits).
+
 **InstagramEmbed** is a lightweight Instagram link embedding tool designed for Discord and other platforms supporting the [Open Graph Protocol (OGP)](https://ogp.me/). It offers full support for embedding Instagram photos and videos, enabling seamless previews across chats, forums, and websites.
 
 InstagramEmbed talks **directly to Instagram** — there is no snapsave.app, snaptik.app, or any other third-party downloader site in the request path. It calls Instagram's own media-info endpoint (the same one instagram.com's own clients use), with an optional operator-owned Instagram session for reliability, and falls back to Instagram's public embed page if that fails.
@@ -37,35 +39,32 @@ For more information, visit [vxinstagram.com](https://vxinstagram.com)
 - A domain pointing to your server
 - A reverse proxy (Nginx, Caddy, etc.) for TLS
 
-### Run from Docker Hub
-
-Pull and run the pre-built image:
-
-```bash
-docker pull alsauce/vxinstagram:latest
-
-docker run -d \
-  --name vxinstagram \
-  --restart unless-stopped \
-  -p 8080:8080 \
-  alsauce/vxinstagram:latest
-```
-
-Point your reverse proxy at port `8080`.
+There's no pre-built image for this fork — the original `alsauce/vxinstagram` Docker Hub image is built from the snapsave-based codebase and won't have these changes, so build from source instead. There's also no Node stage to worry about anymore, which makes the build a bit faster.
 
 ### Build from Source
 
-Clone the repository and build the Docker image:
+Clone the fork and build the Docker image:
 
 ```bash
-git clone https://github.com/Lainmode/InstagramEmbed-vxinstagram
-cd InstagramEmbed-vxinstagram/InstagramEmbedForDiscord
+git clone https://github.com/KayleighOwO/InstagramEmbed-xvinstagram
+cd InstagramEmbed-xvinstagram/InstagramEmbedForDiscord
 docker build -t vxinstagram .
 docker run -d \
   --name vxinstagram \
   --restart unless-stopped \
   -p 8080:8080 \
   vxinstagram
+```
+
+Point your reverse proxy at port `8080`.
+
+### Or with Docker Compose
+
+The same directory has a `docker-compose.yml` with the donation/app env vars already wired up (including the optional `Instagram__*` session vars, commented out — see [Configuration](#configuration)):
+
+```bash
+cd InstagramEmbed-xvinstagram/InstagramEmbedForDiscord
+docker compose up -d --build
 ```
 
 
@@ -91,7 +90,8 @@ Leaving these blank runs the app in fully anonymous mode. It'll still work for a
 
 ## Credits
 
-- Backend by [Lainmode](https://github.com/Lainmode)
+- This fork: [KayleighOwO](https://github.com/KayleighOwO) — [InstagramEmbed-xvinstagram](https://github.com/KayleighOwO/InstagramEmbed-xvinstagram), reworked to fetch directly from Instagram
+- Original project: [Lainmode/InstagramEmbed-vxinstagram](https://github.com/Lainmode/InstagramEmbed-vxinstagram)
 - Twitter: [@realAlita](https://twitter.com/realAlita)
 
 ## Support
